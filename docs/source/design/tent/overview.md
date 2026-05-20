@@ -30,19 +30,25 @@ For each request, the TENT runtime determines which transport backends and paths
 
 If a direct path is not available, TENT automatically constructs a staged transfer, such as moving data through host memory. This logic is handled entirely inside the runtime and does not require application changes.
 
-### Fine-Grained Scheduling with Telemetry
+### Transport-Level Slice Execution
 
-When multiple paths or rails are available, TENT does not rely on static striping. Large transfers are divided into smaller slices, and each slice is scheduled independently.
+When multiple paths or rails are available, large transfers may be divided into
+smaller slices inside the transport execution layer.
 
-The runtime uses simple telemetry, such as observed completion time and queue depth, to decide where to send each slice. Slower or congested paths naturally receive fewer slices, while faster paths receive more.
+The current RDMA path combines topology, retry or fallback decisions, worker
+distribution, and device-quota feedback when placing slices. Future work may
+add richer telemetry-driven slice scheduling.
 
-This approach allows TENT to use multiple rails efficiently while avoiding head-of-line blocking caused by a single slow path.
+The Transfer Queue RFC covers a higher layer: admission and ordering of
+logical transfers before they enter transport execution.
 
 ### In-Runtime Failure Handling
 
 Partial failures are common in large clusters. Instead of surfacing these failures to applications, TENT handles them inside the data path.
 
-If a path becomes slow or unavailable, the runtime temporarily stops scheduling slices on that path and continues using other available paths. If an entire backend becomes unavailable, another backend is selected automatically.
+If a path becomes slow or unavailable, the runtime and transport layer stop
+using that path and continue through other available paths. If an entire
+backend becomes unavailable, another backend is selected automatically.
 
 Slices are retried when necessary, and recovered paths are added back once they become stable. From the application's perspective, transfers continue to work, possibly with reduced performance for a short period.
 
@@ -53,10 +59,13 @@ At a high level, TENT consists of:
 * A declarative API for submitting transfer requests
 * A segment abstraction that represents data locations
 * A set of pluggable transport backends (RDMA, NVLink, shared memory, etc.)
-* A runtime that performs path selection, scheduling, and failure handling
+* A runtime that coordinates path selection, admission policy, and failure
+  handling
 * A low-overhead datapath implemented with worker threads and lock-free queues
 
-Transport backends are intentionally small and focused on data movement. Scheduling and policy decisions are centralized in the runtime.
+Transport backends are focused on data movement. Higher-level path selection
+and admission policy live in the runtime, while low-level worker, slice, and
+hardware-queue scheduling remains transport-owned.
 
 ## Typical Use Cases
 
@@ -69,11 +78,26 @@ TENT is intended for cases where data transfer is on the critical path, such as:
 
 ## Summary
 
-TENT extends the classic Mooncake Transfer Engine by moving transport selection, scheduling, and failure handling into the runtime. This allows applications to run efficiently on heterogeneous and changing hardware without embedding transport-specific logic.
+TENT extends the classic Mooncake Transfer Engine by moving transport
+selection, higher-level scheduling policy, and failure handling into the
+runtime. This allows applications to run efficiently on heterogeneous and
+changing hardware without embedding transport-specific logic.
 
 The design favors predictable behavior and operational simplicity over manual tuning and static configuration.
 
-## TENT C++ API Reference 
+## TENT Design Documents
+
+These documents may discuss different scheduling layers. The Transfer Queue
+RFC focuses on admission and ordering of logical transfers before they enter
+transport execution; it does not replace RDMA slice scheduling.
+
+:::{toctree}
+:maxdepth: 1
+
+transfer-queue-rfc
+:::
+
+## TENT C++ API Reference
 
 :::{toctree}
 :maxdepth: 1

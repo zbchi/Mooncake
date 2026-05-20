@@ -25,6 +25,9 @@ REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.23.8
 YALANTINGLIBS_VERSION=0.5.7
+APT_TMP_DIR=""
+APT_SOURCE_FILE=""
+APT_SOURCEPARTS_DIR=""
 
 # Function to print section headers
 print_section() {
@@ -49,9 +52,47 @@ check_success() {
     fi
 }
 
+cleanup_apt_tmp_dir() {
+    if [ -n "$APT_TMP_DIR" ] && [ -d "$APT_TMP_DIR" ]; then
+        rm -rf "$APT_TMP_DIR"
+    fi
+}
+
+prepare_ubuntu_apt_sources() {
+    APT_TMP_DIR=$(mktemp -d /tmp/mooncake-apt.XXXXXX)
+    check_success "Failed to create temporary APT directory"
+
+    APT_SOURCEPARTS_DIR="${APT_TMP_DIR}/sources.list.d"
+    mkdir -p "${APT_SOURCEPARTS_DIR}"
+    check_success "Failed to create temporary APT sources directory"
+
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        APT_SOURCE_FILE="${APT_TMP_DIR}/ubuntu.sources"
+        cp /etc/apt/sources.list.d/ubuntu.sources "${APT_SOURCE_FILE}"
+        check_success "Failed to prepare Ubuntu official sources"
+    elif [ -f /etc/apt/sources.list ]; then
+        APT_SOURCE_FILE="${APT_TMP_DIR}/sources.list"
+        cp /etc/apt/sources.list "${APT_SOURCE_FILE}"
+        check_success "Failed to prepare Ubuntu official sources"
+    else
+        print_error "Unable to find Ubuntu official APT sources on this system"
+    fi
+}
+
+run_apt_get() {
+    apt-get \
+        -o Dir::Etc::sourcelist="${APT_SOURCE_FILE}" \
+        -o Dir::Etc::sourceparts="${APT_SOURCEPARTS_DIR}" \
+        "$@"
+}
+
+trap cleanup_apt_tmp_dir EXIT
+
 if [ $(id -u) -ne 0 ]; then
 	print_error "Require root permission, try sudo ./dependencies.sh"
 fi
+
+prepare_ubuntu_apt_sources
 
 # Parse command line arguments
 SKIP_CONFIRM=false
@@ -94,7 +135,8 @@ fi
 
 # Update package lists
 print_section "Updating package lists"
-apt-get update
+echo -e "${YELLOW}Using temporary Ubuntu official APT sources for this install only.${NC}"
+run_apt_get update
 check_success "Failed to update package lists"
 
 # Install system packages
@@ -134,7 +176,7 @@ SYSTEM_PACKAGES="build-essential \
                   libc6-dev \
                   libc-bin"
 
-apt-get install -y $SYSTEM_PACKAGES
+run_apt_get install -y $SYSTEM_PACKAGES
 check_success "Failed to install system packages"
 print_success "System packages installed successfully"
 
