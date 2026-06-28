@@ -24,6 +24,13 @@ using namespace mooncake::tent;
 
 int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
                       int num_threads) {
+    if (XferBenchConfig::bench_mode != "sync" &&
+        XferBenchConfig::bench_mode != "submit_burst") {
+        LOG(ERROR) << "Invalid args: bench_mode only supports "
+                      "sync|submit_burst";
+        exit(EXIT_FAILURE);
+    }
+
     bool mixed_opcode = false;
     OpCode opcode = READ;
     if (XferBenchConfig::check_consistency || XferBenchConfig::op_type == "mix")
@@ -36,6 +43,15 @@ int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
         LOG(ERROR) << "Invalid args: workload only support read|write|mix";
         exit(EXIT_FAILURE);
     }
+    if (XferBenchConfig::bench_mode == "submit_burst" && mixed_opcode) {
+        LOG(ERROR) << "submit_burst mode only supports read|write";
+        exit(EXIT_FAILURE);
+    }
+    if (XferBenchConfig::bench_mode != "submit_burst" &&
+        XferBenchConfig::size_pattern != "fixed") {
+        LOG(ERROR) << "size_pattern is only supported with submit_burst";
+        exit(EXIT_FAILURE);
+    }
 
     XferBenchStats stats;
     std::mutex mutex;
@@ -43,6 +59,14 @@ int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
         runner.pinThread(thread_id);
         auto max_block_size = XferBenchConfig::max_block_size;
         auto max_batch_size = XferBenchConfig::max_batch_size;
+        if (XferBenchConfig::bench_mode == "submit_burst") {
+            size_t max_burst_block_size = max_block_size;
+            if (XferBenchConfig::size_pattern == "small_large") {
+                max_burst_block_size *= 256;
+            }
+            max_block_size = max_burst_block_size;
+            max_batch_size *= XferBenchConfig::burst_depth;
+        }
         auto local_gpu_offset = std::max(0, XferBenchConfig::local_gpu_id);
         auto target_gpu_offset = std::max(0, XferBenchConfig::target_gpu_id);
         uint64_t local_addr = runner.getLocalBufferBase(
@@ -52,11 +76,21 @@ int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
 
         XferBenchTimer timer;
         while (timer.lap_us(false) < 1000000ull) {
-            runner.runSingleTransfer(local_addr, target_addr, block_size,
-                                     batch_size, opcode);
+            if (XferBenchConfig::bench_mode == "submit_burst") {
+                std::vector<XferSample> warmup_duration;
+                if (runner.runSubmitBurst(
+                        local_addr, target_addr, block_size, batch_size, opcode,
+                        XferBenchConfig::burst_depth, warmup_duration) != 0) {
+                    return -1;
+                }
+            } else {
+                runner.runSingleTransfer(local_addr, target_addr, block_size,
+                                         batch_size, opcode);
+            }
         }
         timer.reset();
         std::vector<double> transfer_duration;
+        std::vector<XferSample> burst_duration;
         if (mixed_opcode) {
             while (timer.lap_us(false) <
                    XferBenchConfig::duration * 1000000ull) {
@@ -78,21 +112,50 @@ int processBatchSizes(BenchRunner& runner, size_t block_size, size_t batch_size,
         } else {
             while (timer.lap_us(false) <
                    XferBenchConfig::duration * 1000000ull) {
-                auto val = runner.runSingleTransfer(
-                    local_addr, target_addr, block_size, batch_size, opcode);
-                transfer_duration.push_back(val);
+                if (XferBenchConfig::bench_mode == "submit_burst") {
+                    if (runner.runSubmitBurst(local_addr, target_addr,
+                                              block_size, batch_size, opcode,
+                                              XferBenchConfig::burst_depth,
+                                              burst_duration) != 0) {
+                        return -1;
+                    }
+                } else {
+                    auto val = runner.runSingleTransfer(local_addr, target_addr,
+                                                        block_size, batch_size,
+                                                        opcode);
+                    transfer_duration.push_back(val);
+                }
             }
         }
         auto total_duration = timer.lap_us();
         mutex.lock();
         stats.total_duration.add(total_duration);
         for (auto val : transfer_duration) stats.transfer_duration.add(val);
+        for (const auto& sample : burst_duration) {
+            stats.transfer_duration.add(sample.duration_us);
+            if (sample.priority == kBenchPrioHigh) {
+                stats.high_priority_duration.add(sample.duration_us);
+            } else if (sample.priority == kBenchPrioMedium) {
+                stats.medium_priority_duration.add(sample.duration_us);
+            } else if (sample.priority == kBenchPrioLow) {
+                stats.low_priority_duration.add(sample.duration_us);
+            }
+            if (sample.request_size == block_size) {
+                stats.small_request_duration.add(sample.duration_us);
+            } else if (sample.request_size > block_size) {
+                stats.large_request_duration.add(sample.duration_us);
+            }
+        }
         mutex.unlock();
         return 0;
     });
 
     if (rc != 0) return -1;
-    printStats(block_size, batch_size, stats, num_threads);
+    if (XferBenchConfig::bench_mode == "submit_burst") {
+        printBurstStats(block_size, batch_size, stats, num_threads);
+    } else {
+        printStats(block_size, batch_size, stats, num_threads);
+    }
     return 0;
 }
 
@@ -139,7 +202,15 @@ int main(int argc, char* argv[]) {
             for (size_t batch_size = XferBenchConfig::start_batch_size;
                  !interrupted && batch_size <= XferBenchConfig::max_batch_size;
                  batch_size *= 2) {
-                if (block_size * batch_size * num_threads >
+                size_t charged_batch_size = batch_size;
+                size_t charged_block_size = block_size;
+                if (XferBenchConfig::bench_mode == "submit_burst") {
+                    charged_batch_size *= XferBenchConfig::burst_depth;
+                    if (XferBenchConfig::size_pattern == "small_large") {
+                        charged_block_size *= 256;
+                    }
+                }
+                if (charged_block_size * charged_batch_size * num_threads >
                     XferBenchConfig::total_buffer_size) {
                     LOG(INFO) << "Skipped for block_size " << block_size
                               << " batch_size " << batch_size;

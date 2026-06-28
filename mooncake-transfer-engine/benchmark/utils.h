@@ -51,6 +51,10 @@
 
 namespace mooncake {
 namespace tent {
+static constexpr int kBenchPrioHigh = 0;
+static constexpr int kBenchPrioMedium = 1;
+static constexpr int kBenchPrioLow = 2;
+
 struct XferBenchConfig {
     static void loadFromFlags();
 
@@ -58,6 +62,9 @@ struct XferBenchConfig {
     static std::string seg_type;
     static std::string target_seg_name;
     static std::string op_type;
+    static std::string bench_mode;
+    static std::string priority_pattern;
+    static std::string size_pattern;
     static bool check_consistency;
 
     static size_t total_buffer_size;
@@ -66,6 +73,7 @@ struct XferBenchConfig {
     static size_t start_batch_size;
     static size_t max_batch_size;
     static int duration;
+    static size_t burst_depth;
     static int max_num_threads;
     static int start_num_threads;
 
@@ -123,6 +131,17 @@ struct XferMetricStats {
 struct XferBenchStats {
     XferMetricStats total_duration;
     XferMetricStats transfer_duration;
+    XferMetricStats high_priority_duration;
+    XferMetricStats medium_priority_duration;
+    XferMetricStats low_priority_duration;
+    XferMetricStats small_request_duration;
+    XferMetricStats large_request_duration;
+};
+
+struct XferSample {
+    double duration_us{0};
+    int priority{0};
+    size_t request_size{0};
 };
 
 class XferBenchTimer {
@@ -152,6 +171,9 @@ void printStatsHeader();
 
 void printStats(size_t block_size, size_t batch_size, XferBenchStats& stats,
                 int num_threads);
+
+void printBurstStats(size_t block_size, size_t batch_size,
+                     XferBenchStats& stats, int num_threads);
 
 #if defined(USE_CUDA) || defined(USE_SUNRISE)
 static inline bool isCudaMemory(void* ptr) {

@@ -92,6 +92,33 @@ static TransportType getTransportType(const std::string& xport_type) {
     return UNSPEC;
 }
 
+static int priorityForBatch(size_t batch_index) {
+    if (XferBenchConfig::priority_pattern == "high") return kBenchPrioHigh;
+    if (XferBenchConfig::priority_pattern == "medium") return kBenchPrioMedium;
+    if (XferBenchConfig::priority_pattern == "low") return kBenchPrioLow;
+    if (XferBenchConfig::priority_pattern == "round_robin") {
+        const size_t slot = batch_index % 3;
+        if (slot == 0) return kBenchPrioHigh;
+        if (slot == 1) return kBenchPrioMedium;
+        return kBenchPrioLow;
+    }
+    if (XferBenchConfig::priority_pattern == "high_every_n") {
+        return batch_index % 8 == 7 ? kBenchPrioHigh : kBenchPrioLow;
+    }
+    LOG(ERROR) << "Invalid priority_pattern: "
+               << XferBenchConfig::priority_pattern;
+    exit(EXIT_FAILURE);
+}
+
+static size_t blockSizeForBatch(size_t base_block_size, size_t batch_index) {
+    if (XferBenchConfig::size_pattern == "fixed") return base_block_size;
+    if (XferBenchConfig::size_pattern == "small_large") {
+        return batch_index % 8 == 7 ? base_block_size : base_block_size * 256;
+    }
+    LOG(ERROR) << "Invalid size_pattern: " << XferBenchConfig::size_pattern;
+    exit(EXIT_FAILURE);
+}
+
 int TENTBenchRunner::allocateBuffers() {
     const auto total_buffer_size = XferBenchConfig::total_buffer_size;
     const auto& seg_type = XferBenchConfig::seg_type;
@@ -371,6 +398,84 @@ double TENTBenchRunner::runSingleTransfer(uint64_t local_addr,
     auto duration = timer.lap_us();
     CHECK_FAIL(engine_->freeBatch(batch_id));
     return duration;
+}
+
+int TENTBenchRunner::runSubmitBurst(
+    uint64_t local_addr, uint64_t target_addr, uint64_t block_size,
+    uint64_t batch_size, OpCode opcode, size_t burst_depth,
+    std::vector<XferSample>& transfer_duration) {
+    struct PendingBatch {
+        BatchID batch_id{0};
+        uint64_t submit_us{0};
+        int priority{kBenchPrioHigh};
+        size_t request_size{0};
+        bool done{false};
+    };
+
+    if (burst_depth == 0) return 0;
+    std::vector<PendingBatch> pending;
+    pending.reserve(burst_depth);
+    XferBenchTimer timer;
+    uint64_t burst_offset = 0;
+
+    for (size_t batch_index = 0; batch_index < burst_depth; ++batch_index) {
+        auto batch_id = engine_->allocateBatch(batch_size);
+        std::vector<Request> requests;
+        requests.reserve(batch_size);
+        const size_t request_size = blockSizeForBatch(block_size, batch_index);
+        const int priority = priorityForBatch(batch_index);
+        for (uint64_t i = 0; i < batch_size; ++i) {
+            Request entry;
+            entry.opcode = opcode == READ ? Request::READ : Request::WRITE;
+            entry.length = request_size;
+            entry.source =
+                (void*)(local_addr + burst_offset + request_size * i);
+            entry.target_id = handle_;
+            entry.target_offset = target_addr + burst_offset + request_size * i;
+            entry.priority = priority;
+            entry.transport_hint = transport_hint_;
+            requests.emplace_back(entry);
+        }
+
+        PendingBatch pending_batch;
+        pending_batch.batch_id = batch_id;
+        pending_batch.submit_us = timer.lap_us(false);
+        pending_batch.priority = priority;
+        pending_batch.request_size = request_size;
+        if (XferBenchConfig::notifi) {
+            Notification notifi{"benchmark", std::to_string(target_addr)};
+            CHECK_FAIL(engine_->submitTransfer(batch_id, requests, notifi));
+        } else {
+            CHECK_FAIL(engine_->submitTransfer(batch_id, requests));
+        }
+        pending.push_back(pending_batch);
+        burst_offset += request_size * batch_size;
+    }
+
+    size_t remaining = pending.size();
+    while (remaining > 0) {
+        for (auto& batch : pending) {
+            if (batch.done) continue;
+            TransferStatus overall_status;
+            CHECK_FAIL(
+                engine_->getTransferStatus(batch.batch_id, overall_status));
+            if (overall_status.s == TransferStatusEnum::COMPLETED) {
+                const auto complete_us = timer.lap_us(false);
+                XferSample sample;
+                sample.duration_us = complete_us - batch.submit_us;
+                sample.priority = batch.priority;
+                sample.request_size = batch.request_size;
+                transfer_duration.push_back(sample);
+                CHECK_FAIL(engine_->freeBatch(batch.batch_id));
+                batch.done = true;
+                --remaining;
+            } else if (overall_status.s == TransferStatusEnum::FAILED) {
+                LOG(ERROR) << "Failed transfer detected";
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+    return 0;
 }
 
 }  // namespace tent

@@ -58,6 +58,20 @@ class BenchRunner {
     virtual double runSingleTransfer(uint64_t local_addr, uint64_t target_addr,
                                      uint64_t block_size, uint64_t batch_size,
                                      OpCode opcode) = 0;
+
+    virtual int runSubmitBurst(uint64_t local_addr, uint64_t target_addr,
+                               uint64_t block_size, uint64_t batch_size,
+                               OpCode opcode, size_t burst_depth,
+                               std::vector<XferSample>& transfer_duration) {
+        for (size_t i = 0; i < burst_depth; ++i) {
+            XferSample sample;
+            sample.duration_us = runSingleTransfer(
+                local_addr, target_addr, block_size, batch_size, opcode);
+            sample.request_size = block_size;
+            transfer_duration.push_back(sample);
+        }
+        return 0;
+    }
 };
 
 }  // namespace tent

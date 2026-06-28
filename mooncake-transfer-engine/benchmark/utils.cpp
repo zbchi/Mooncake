@@ -22,6 +22,17 @@ DEFINE_string(seg_type, "DRAM",
               "Memory segment type for the target side: DRAM|VRAM");
 DEFINE_string(target_seg_name, "", "Memory segment name for the target side");
 DEFINE_string(op_type, "read", "Operation type to benchmark: read|write|mix");
+DEFINE_string(bench_mode, "sync",
+              "Benchmark mode: sync|submit_burst. submit_burst submits "
+              "multiple batches before polling completions.");
+DEFINE_string(priority_pattern, "high",
+              "Request priority pattern: high|medium|low|round_robin|"
+              "high_every_n. high_every_n submits seven low batches followed "
+              "by one high batch.");
+DEFINE_string(size_pattern, "fixed",
+              "Request size pattern in submit_burst mode: fixed|small_large. "
+              "small_large submits seven large batches followed by one small "
+              "batch.");
 DEFINE_bool(check_consistency, false,
             "Enable data consistency check after transfer.");
 DEFINE_uint64(total_buffer_size, 1UL << 30,
@@ -31,6 +42,9 @@ DEFINE_uint64(max_block_size, 1UL << 26, "Maximum block size (in bytes).");
 DEFINE_uint64(start_batch_size, 1, "Start batch size (number of requests).");
 DEFINE_uint64(max_batch_size, 1, "Maximum batch size (number of requests).");
 DEFINE_int32(duration, 5, "Number of duration per test case.");
+DEFINE_uint64(burst_depth, 64,
+              "Number of batches submitted before polling in submit_burst "
+              "mode.");
 DEFINE_int32(start_num_threads, 1,
              "Start number of concurrent worker threads.");
 DEFINE_int32(max_num_threads, 1,
@@ -60,6 +74,9 @@ std::string XferBenchConfig::seg_name;
 std::string XferBenchConfig::seg_type;
 std::string XferBenchConfig::target_seg_name;
 std::string XferBenchConfig::op_type;
+std::string XferBenchConfig::bench_mode;
+std::string XferBenchConfig::priority_pattern;
+std::string XferBenchConfig::size_pattern;
 bool XferBenchConfig::check_consistency = false;
 
 size_t XferBenchConfig::total_buffer_size = 0;
@@ -68,6 +85,7 @@ size_t XferBenchConfig::max_block_size = 0;
 size_t XferBenchConfig::start_batch_size = 0;
 size_t XferBenchConfig::max_batch_size = 0;
 int XferBenchConfig::duration = 0;
+size_t XferBenchConfig::burst_depth = 0;
 int XferBenchConfig::max_num_threads = 0;
 int XferBenchConfig::start_num_threads = 0;
 
@@ -87,6 +105,9 @@ void XferBenchConfig::loadFromFlags() {
     seg_name = FLAGS_seg_name;
     target_seg_name = FLAGS_target_seg_name;
     op_type = FLAGS_op_type;
+    bench_mode = FLAGS_bench_mode;
+    priority_pattern = FLAGS_priority_pattern;
+    size_pattern = FLAGS_size_pattern;
     check_consistency = FLAGS_check_consistency;
 
     total_buffer_size = FLAGS_total_buffer_size;
@@ -97,6 +118,7 @@ void XferBenchConfig::loadFromFlags() {
     start_num_threads = FLAGS_start_num_threads;
     max_num_threads = FLAGS_max_num_threads;
     duration = FLAGS_duration;
+    burst_depth = FLAGS_burst_depth;
 
     metadata_type = FLAGS_metadata_type;
     metadata_url_list = FLAGS_metadata_url_list;
@@ -166,6 +188,34 @@ void printStats(size_t block_size, size_t batch_size, XferBenchStats& stats,
               << std::setw(14) << stats.transfer_duration.p999()
               << std::endl;
     // clang-format on
+}
+
+void printBurstStats(size_t block_size, size_t batch_size,
+                     XferBenchStats& stats, int num_threads) {
+    printStats(block_size, batch_size, stats, num_threads);
+    if (stats.high_priority_duration.count() == 0 &&
+        stats.medium_priority_duration.count() == 0 &&
+        stats.low_priority_duration.count() == 0) {
+        return;
+    }
+
+    std::cout << "  priority latency us:"
+              << " high(avg=" << std::fixed << std::setprecision(1)
+              << stats.high_priority_duration.avg()
+              << ", p99=" << stats.high_priority_duration.p99() << ")"
+              << " medium(avg=" << stats.medium_priority_duration.avg()
+              << ", p99=" << stats.medium_priority_duration.p99() << ")"
+              << " low(avg=" << stats.low_priority_duration.avg()
+              << ", p99=" << stats.low_priority_duration.p99() << ")"
+              << std::endl;
+    if (XferBenchConfig::size_pattern == "small_large") {
+        std::cout << "  size latency us:"
+                  << " small(avg=" << stats.small_request_duration.avg()
+                  << ", p99=" << stats.small_request_duration.p99() << ")"
+                  << " large(avg=" << stats.large_request_duration.avg()
+                  << ", p99=" << stats.large_request_duration.p99() << ")"
+                  << std::endl;
+    }
 }
 
 }  // namespace tent

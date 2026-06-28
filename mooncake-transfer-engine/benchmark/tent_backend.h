@@ -74,6 +74,11 @@ class TENTBenchRunner : public BenchRunner {
                              uint64_t block_size, uint64_t batch_size,
                              OpCode opcode);
 
+    int runSubmitBurst(uint64_t local_addr, uint64_t target_addr,
+                       uint64_t block_size, uint64_t batch_size, OpCode opcode,
+                       size_t burst_depth,
+                       std::vector<XferSample>& transfer_duration);
+
    private:
     int allocateBuffers();
 
